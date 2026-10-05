@@ -9,9 +9,9 @@ from fastapi.responses import JSONResponse
 
 from . import db
 from .errors import AppError
-from .schemas import CreateOrderRequest, EventBatchRequest, EventIn
+from .schemas import CreateOrderRequest, EventBatchRequest, EventIn, EventPreviewRequest
 from .services import (archive_determination, create_order, determination_history,
-                       ingest_events, list_events, live_determination)
+                       ingest_events, list_events, live_determination, preview_events)
 
 
 @asynccontextmanager
@@ -86,6 +86,14 @@ def api_ingest_event(order_id: str, req: EventIn):
 @app.post("/api/v1/orders/{order_id}/events/batch")
 def api_ingest_batch(order_id: str, req: EventBatchRequest):
     return ingest_events(order_id, req.events)
+
+
+@app.post("/api/v1/orders/{order_id}/events/preview")
+def api_preview_events(order_id: str, req: EventPreviewRequest):
+    """无写入预演：在当前最新代事件视图上模拟整批摄取（含更正规则），
+    返回逐项校验结果、首个失败位置、模拟判定与判定依据差异；
+    不写事件、不开新代、不改归档快照。已归档订单按新一代结果计算。"""
+    return preview_events(order_id, req.events, as_of=req.as_of)
 
 
 @app.get("/api/v1/orders/{order_id}/events")

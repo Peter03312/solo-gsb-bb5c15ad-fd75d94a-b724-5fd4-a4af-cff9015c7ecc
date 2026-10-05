@@ -8,8 +8,9 @@
 2. 提交"迟到签收"扫描事件 -> 查询判定（延迟可申请，截止按工作日跳过春节）；
 3. 归档判定；
 4. 重放同一事件 -> 不重复计入；倒序事件 -> 明确错误；
-5. 迟到的更正事件（把签收修正到承诺时限前）-> 产生第 2 代新判定，第 1 代快照不变；
-6. 查询判定历史。
+5. 无写入预演迟到的更正事件 -> 模拟新一代结果与判定差异，系统状态不变；
+6. 正式提交该更正事件 -> 产生第 2 代新判定，与预演结果一致，第 1 代快照不变；
+7. 查询判定历史。
 """
 import json
 import os
@@ -106,12 +107,29 @@ def main():
         "target_event_id": "EV-SIGNED-01",
         "note": "网点补传准确签收时间",
     }
+
+    # 无写入预演：正式提交前，先模拟这批更正事件的影响（不落库、不开新代）
+    preview = call("POST", f"/api/v1/orders/{ORDER_ID}/events/preview",
+                   {"as_of": "2025-02-21T12:00:00+08:00", "events": [correction]})
+    print("\n===== 无写入预演：模拟新一代结果与判定差异 =====")
+    if preview:
+        sim = preview["simulation"]
+        print(f"  校验通过={preview['valid']}，首个失败位置={preview['first_failure_index']}")
+        print(f"  模拟代=第 {sim['generation_no']} 代（would_reopen={sim['would_reopen']}，"
+              f"归档快照不受影响）")
+        for c in preview["diff"]["claims"]:
+            if c["changed"]:
+                print(f"  {c['claim_type']}: {c['status_before']} -> {c['status_after']}")
+        print("  判定依据新增：")
+        for line in preview["diff"]["basis_added"]:
+            print("   +", line)
+
     reopened = call("POST", f"/api/v1/orders/{ORDER_ID}/events", correction)
-    show("迟到更正：自动开启第 2 代", reopened,
+    show("正式提交迟到更正：自动开启第 2 代", reopened,
          keys=("accepted", "reopened", "generation_no", "note"))
 
     det2 = call("GET", f"/api/v1/orders/{ORDER_ID}/determination")
-    show("第 2 代判定：延迟不再成立（not_applicable），旧归档未被改写", det2)
+    show("第 2 代判定：延迟不再成立（not_applicable），与预演一致，旧归档未被改写", det2)
 
     hist = call("GET", f"/api/v1/orders/{ORDER_ID}/determinations")
     print("\n===== 判定历史 =====")

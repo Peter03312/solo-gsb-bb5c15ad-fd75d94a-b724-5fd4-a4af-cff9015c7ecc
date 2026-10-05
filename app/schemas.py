@@ -54,3 +54,17 @@ class EventIn(BaseModel):
 
 class EventBatchRequest(BaseModel):
     events: list[EventIn] = Field(min_length=1)
+
+
+class EventPreviewRequest(BaseModel):
+    """无写入预演入参：一批按到达顺序排列、尚未写入的事件 + 可选判定基准时刻。"""
+    events: list[EventIn] = Field(min_length=1)
+    as_of: datetime | None = Field(
+        default=None, description="判定基准时刻（带时区偏移），缺省取服务当前 UTC 时间")
+
+    @field_validator("as_of")
+    @classmethod
+    def _tz(cls, v):
+        if v is not None:
+            _aware(v, "as_of")
+        return v

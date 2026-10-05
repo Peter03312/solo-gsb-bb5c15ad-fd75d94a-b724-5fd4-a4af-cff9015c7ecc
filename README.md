@@ -52,6 +52,7 @@
    - `cancel`：撤销目标事件（如丢件确认被推翻）；
    - `insert`：补录一条此前漏掉的扫描（允许类型：signed / damage_reported / lost_confirmed）。
    更正只影响"物化"后的判定视图，原始事件行永不修改或删除。
+6. **无写入预演**：`POST .../events/preview` 在当前最新代事件视图上按同一套规则模拟整批处理，返回逐项校验结果、首个失败位置、模拟后的各理赔状态/截止时间/缺失证据与判定依据差异；任一事件违反约束即整批预演失败（错误码与正式摄取一致），全程不写事件、不开新代、不改归档快照。已归档订单的预演明确按**新一代**（`gen_no+1`）结果计算。
 
 ## 目录结构
 
@@ -68,7 +69,7 @@ app/
   main.py          # FastAPI 路由
 init_db.py         # 初始化入口（建表 + 种子，幂等）
 examples/call_api.py  # 端到端调用示例（仅标准库）
-tests/             # pytest 引擎单测 + API 端到端测试（26 个用例）
+tests/             # pytest 引擎单测 + API 端到端测试（41 个用例）
 Dockerfile, docker-compose.yml
 ```
 
@@ -124,6 +125,7 @@ pytest -q
 | GET | `/api/v1/orders/{id}` | 查询订单 |
 | POST | `/api/v1/orders/{id}/events` | 提交单个扫描事件 |
 | POST | `/api/v1/orders/{id}/events/batch` | 批量提交（顺序错误整批回滚） |
+| POST | `/api/v1/orders/{id}/events/preview` | 无写入预演：模拟整批摄取，返回校验结果与判定差异 |
 | GET | `/api/v1/orders/{id}/events` | 查看已接受事件流 |
 | GET | `/api/v1/orders/{id}/determination?as_of=...` | 当前判定（最新代已归档则返回快照） |
 | POST | `/api/v1/orders/{id}/determination/archive?as_of=...` | 归档当前代判定 |
@@ -215,6 +217,57 @@ curl -s -X POST http://localhost:8000/api/v1/orders/O-1001/events \
 
 curl -s http://localhost:8000/api/v1/orders/O-1001/determinations
 ```
+
+**5) 无写入预演：正式提交前模拟更正事件的影响（不落库、不开新代）**
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/orders/O-1001/events/preview \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "as_of": "2025-02-21T12:00:00+08:00",
+    "events": [{
+      "event_id": "EV-CORR-2",
+      "event_type": "signed",
+      "event_time": "2025-02-09T09:00:00+08:00",
+      "arrived_at": "2025-02-21T08:00:00+08:00",
+      "correction_action": "amend",
+      "target_event_id": "EV-1"
+    }]
+  }'
+```
+
+响应节选（此时第 1 代已归档，预演明确按第 2 代计算；归档快照不变）：
+
+```json
+{
+  "dry_run": true,
+  "valid": true,
+  "first_failure_index": null,
+  "items": [{"index": 0, "event_id": "EV-CORR-2", "valid": true, "checks": [
+    {"check": "shape", "passed": true}, {"check": "duplicate", "passed": true},
+    {"check": "arrival_order", "passed": true}, {"check": "correction_target", "passed": true}
+  ]}],
+  "simulation": {
+    "current_generation_archived": true,
+    "would_reopen": true,
+    "generation_no": 2,
+    "supersedes_generation": 1,
+    "determination": {"overall_status": "pending", "claims": [
+      {"claim_type": "delay", "status": "not_applicable", "...": "..."}
+    ]}
+  },
+  "diff": {
+    "overall_status": {"before": "filable", "after": "pending", "changed": true},
+    "claims": [{"claim_type": "delay", "status_before": "filable",
+                "status_after": "not_applicable", "changed": true, "...": "..."}],
+    "basis_added": ["本次判定已纳入迟到更正事件：", "..."],
+    "basis_removed": []
+  },
+  "no_writes": "本次为无写入预演：未写入任何事件、未开启新代、归档快照未受影响"
+}
+```
+
+预演失败（如到达顺序违规）返回与正式摄取相同的错误码，`error.details` 内含逐项校验结果与 `first_failure_index`，且同样零写入。
 
 ## 设计取舍与扩展
 
