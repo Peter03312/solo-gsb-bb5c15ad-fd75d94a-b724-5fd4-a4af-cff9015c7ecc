@@ -68,7 +68,8 @@ app/
   main.py          # FastAPI 路由
 init_db.py         # 初始化入口（建表 + 种子，幂等）
 examples/call_api.py  # 端到端调用示例（仅标准库）
-tests/             # pytest 引擎单测 + API 端到端测试（26 个用例）
+examples/dry_run.py   # 无写入预演调用示例（成功批/倒序失败/归档后按新一代）
+tests/             # pytest 引擎单测 + API 端到端测试（38 个用例）
 Dockerfile, docker-compose.yml
 ```
 
@@ -100,6 +101,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```bash
 pip install -r requirements.txt          # 示例只用标准库，装不装均可
 python examples/call_api.py              # BASE_URL 可改目标地址
+python examples/dry_run.py               # 无写入预演三种场景
 ```
 
 ### 运行测试
@@ -125,6 +127,7 @@ pytest -q
 | POST | `/api/v1/orders/{id}/events` | 提交单个扫描事件 |
 | POST | `/api/v1/orders/{id}/events/batch` | 批量提交（顺序错误整批回滚） |
 | GET | `/api/v1/orders/{id}/events` | 查看已接受事件流 |
+| POST | `/api/v1/orders/{id}/events/dry-run?as_of=...` | **更正事件无写入预演**：不落事件/不开新代/不改快照，返回逐项校验与模拟判定差异 |
 | GET | `/api/v1/orders/{id}/determination?as_of=...` | 当前判定（最新代已归档则返回快照） |
 | POST | `/api/v1/orders/{id}/determination/archive?as_of=...` | 归档当前代判定 |
 | GET | `/api/v1/orders/{id}/determinations` | 全部"代"的判定历史与快照 |
@@ -214,6 +217,40 @@ curl -s -X POST http://localhost:8000/api/v1/orders/O-1001/events \
   }'
 
 curl -s http://localhost:8000/api/v1/orders/O-1001/determinations
+```
+
+**5) 更正事件无写入预演（dry-run）**
+
+在真正摄取前，用 `POST .../events/dry-run` 模拟整批更正的处理结果。请求体与 `/events/batch` 完全一致，`as_of` 可选（缺省取当前时刻）；**接口只读，不写入事件、不开启新一代、不改变归档快照**（响应中 `writes_performed=false`）。
+
+```bash
+curl -s -X POST "http://localhost:8000/api/v1/orders/O-1001/events/dry-run?as_of=2025-02-20T12:00:00%2B08:00" \
+  -H 'Content-Type: application/json' \
+  -d '{"events": [{
+    "event_id": "EV-CORR-1",
+    "event_type": "signed",
+    "event_time": "2025-02-09T09:00:00+08:00",
+    "arrived_at": "2025-02-21T08:00:00+08:00",
+    "correction_action": "amend",
+    "target_event_id": "EV-1",
+    "note": "网点补传准确签收时间"
+  }]}'
+```
+
+响应要点：
+
+- `valid`：整批是否通过全部校验（到达顺序单调、更正目标存在且为基础事件、amend 类型一致、事件类型合法）；
+- `items`：每项的校验结果，`status` 为 `accepted` / `duplicate`（与已落库或批内更早事件同 ID）/ `rejected`（首个失败项）/ `skipped`（首个失败之后的项）；
+- `first_failure`：首个失败位置（`index`、`event_id`、错误码与明细），失败时 `simulated_determination` 与 `diff` 为 `null`，现状完整保留；
+- `baseline_determination`：当前最新代事件视图在同一 `as_of` 上的判定（各理赔状态、截止时间、缺失证据、判定依据）；
+- `simulated_determination`：整批事件按现有 amend/cancel/insert 规则物化后的模拟判定；
+- `diff`：基线 → 模拟的判定依据差异，含 `overall_status` / `eligible_to_file` / 最早截止 / 顶层缺失证据与顶层 `basis` 增删，以及每个发生变化的理赔（状态、截止、锚点、缺失证据增删、依据是否变化）；
+- `would_open_generation` / `simulated_generation_no`：若最新代**已归档**，模拟判定明确按新一代（`gen_no+1`，`supersedes` 指向旧代）计算，同时 `archived_snapshot` 原样回传不可变快照；预演本身不会真的开代。
+
+业务校验失败仍是 HTTP 200 + `valid:false`（这是预演结果而非请求错误）；请求体格式问题（缺字段、naive 时间）仍为 `422 INVALID_REQUEST`，订单不存在为 `404 ORDER_NOT_FOUND`。现有摄取接口（`/events`、`/events/batch`）行为不变。
+
+```bash
+python examples/dry_run.py     # 成功批 / 倒序失败批 / 归档后按新一代预演 三种场景
 ```
 
 ## 设计取舍与扩展

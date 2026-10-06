@@ -11,7 +11,7 @@ from . import db
 from .errors import AppError
 from .schemas import CreateOrderRequest, EventBatchRequest, EventIn
 from .services import (archive_determination, create_order, determination_history,
-                       ingest_events, list_events, live_determination)
+                       dry_run_events, ingest_events, list_events, live_determination)
 
 
 @asynccontextmanager
@@ -86,6 +86,12 @@ def api_ingest_event(order_id: str, req: EventIn):
 @app.post("/api/v1/orders/{order_id}/events/batch")
 def api_ingest_batch(order_id: str, req: EventBatchRequest):
     return ingest_events(order_id, req.events)
+
+
+@app.post("/api/v1/orders/{order_id}/events/dry-run")
+def api_dry_run(order_id: str, req: EventBatchRequest, as_of: str | None = None):
+    """更正事件无写入预演：不落事件、不开新代、不改归档，返回逐项校验与模拟判定差异。"""
+    return dry_run_events(order_id, req.events, as_of=_parse_as_of(as_of))
 
 
 @app.get("/api/v1/orders/{order_id}/events")
